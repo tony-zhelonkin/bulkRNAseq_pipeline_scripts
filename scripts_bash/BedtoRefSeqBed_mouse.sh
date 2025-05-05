@@ -1,18 +1,21 @@
 #!/bin/bash
 
+# Only valid for
+# GRCm39  GCF_000001635.27
+
 # Usage function to display help
 usage() {
-    echo "Usage: $0 -I <input.bed> -O <output.bed>"
+    echo "Usage: $0 -i <input.bed> -o <output.bed>"
     exit 1
 }
 
 # Parse command-line arguments
-while getopts ":I:O:" opt; do
+while getopts ":i:o:" opt; do
     case "${opt}" in
-        I)
+        i)
             INPUT_BED="${OPTARG}"
             ;;
-        O)
+        o)
             OUTPUT_BED="${OPTARG}"
             ;;
         *)
