@@ -1,8 +1,28 @@
 #!/bin/bash
 
+# GTFtoRefFlat.sh
+# 
+# Description:
+#   Converts GTF annotation files to RefFlat format, which is required by some
+#   RNA-seq analysis tools like Picard CollectRnaSeqMetrics. The script handles
+#   both regular GTF files and gzipped GTF files (.gz).
+#
+# Usage:
+#   ./GTFtoRefFlat.sh -i input.gtf[.gz] -o output.refFlat
+#
+# Parameters:
+#   -i  Input GTF file (can be gzipped)
+#   -o  Output RefFlat file
+#
+# Example:
+#   ./GTFtoRefFlat.sh -i gencode.v38.annotation.gtf.gz -o gencode.v38.refFlat
+#
+# Author: Anton Zhelonkin
+# Date: 2025
+
 # Usage message function
 usage() {
-    echo "Usage: $0 -i input.gtf -o output.refFlat"
+    echo "Usage: $0 -i input.gtf[.gz] -o output.refFlat"
     exit 1
 }
 
@@ -26,8 +46,23 @@ if [ -z "$GTF_FILE" ] || [ -z "$REFLAT_OUTPUT" ]; then
     usage
 fi
 
+# Check if input file exists
+if [ ! -f "$GTF_FILE" ]; then
+    echo "Error: Input file '$GTF_FILE' does not exist."
+    exit 1
+fi
+
+# Check if the GTF file is gzipped
+if [[ "$GTF_FILE" == *.gz ]]; then
+    echo "Detected gzipped GTF file. Processing..."
+    GTF_COMMAND="zcat"
+else
+    echo "Processing GTF file..."
+    GTF_COMMAND="cat"
+fi
+
 # Extracting fields from the GTF file and formatting them into RefFlat format
-awk '
+$GTF_COMMAND "$GTF_FILE" | awk '
 BEGIN {OFS="\t"}
 {
     if ($3 == "exon") {
@@ -76,8 +111,7 @@ END {
     for (key in transcripts) {
         print transcripts[key];
     }
-}' "$GTF_FILE" > "$REFLAT_OUTPUT"
+}' > "$REFLAT_OUTPUT"
 
 # Confirm output file creation
 echo "RefFlat file created: $REFLAT_OUTPUT"
-
