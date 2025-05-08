@@ -17,6 +17,8 @@
 #   -m  Alignment mode: 'standard' or 'te' (default: standard)
 #   -j  Number of parallel jobs to run (default: 1)
 #   -f  Memory threshold for GNU parallel (default: 10G)
+#   -t  Number of threads per STAR job (default: 8)
+#   -s  RAM limit for BAM sorting in GB (default: 30G)
 #
 # Supported FASTQ file formats:
 #   - File extensions: .fastq.gz, .fq.gz
@@ -42,17 +44,21 @@ START_TIME=$(date +%s)
 MODE="standard"
 JOB_NUMBER="1"
 GB_FREE="10G"
+THREADS="8"       # Reduced from 10 to 8
+SORT_RAM="30G"    # Reduced from 45GB to 30GB
 
 # Usage message function
 usage() {
-    echo "Usage: $0 -i input_dir -o output_dir -g genome_dir [-m mode] [-j jobs] [-f mem_free]"
+    echo "Usage: $0 -i input_dir -o output_dir -g genome_dir [-m mode] [-j jobs] [-f mem_free] [-t threads] [-s sort_ram]"
     echo "  -m  Alignment mode: 'standard' or 'te' (default: standard)"
-    echo "  -f Keep free RAM, e.g.: '5G' (default: 10G)"
+    echo "  -f  Keep free RAM, e.g.: '5G' (default: 10G)"
+    echo "  -t  Number of threads for STAR (default: 8)"
+    echo "  -s  RAM limit for BAM sorting in GB (default: 30G)"
     exit 1
 }
 
 # Parse command-line arguments
-while getopts "i:o:g:m:j:f:" opt; do
+while getopts "i:o:g:m:j:f:t:s:" opt; do
     case ${opt} in
         i )
             BATCH_DIR=$OPTARG
@@ -71,6 +77,12 @@ while getopts "i:o:g:m:j:f:" opt; do
             ;;
         f )
             GB_FREE=$OPTARG
+            ;;
+        t )
+            THREADS=$OPTARG
+            ;;
+        s )
+            SORT_RAM=$OPTARG
             ;;
         * )
             usage
@@ -118,7 +130,6 @@ log_and_run() {
     eval "$CMD" >> "$LOG_FILE" 2>> >(tee -a "$LOG_FILE" >&2)
 }
 
-
 # Function to process a pair of FASTQ files
 process_fastq_pair() {
     local R1_FILE="$1"
@@ -126,6 +137,8 @@ process_fastq_pair() {
     local BASE_NAME="$3"
     local BATCH_DIR="$4"
     local MODE="$5"
+    local THREADS="$6"
+    local SORT_RAM_BYTES="$7"
 
     # Define read group (@RG) information
     local ID="${BASE_NAME}"
@@ -136,30 +149,29 @@ process_fastq_pair() {
     # Create log file for this sample
     local LOG_FILE="${LOG_DIR}/${BASE_NAME}_log.txt"
 
-
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Processing sample: $BASE_NAME (Mode: $MODE)" >&2
 
     # Set STAR parameters based on mode
     if [[ "$MODE" == "standard" ]]; then
         # Standard RNA-seq alignment parameters
-        log_and_run "STAR --runThreadN 10 \
+        log_and_run "STAR --runThreadN $THREADS \
                      --genomeDir \"$GENOME_DIR\" \
                      --readFilesIn \"$R1_FILE\" \"$R2_FILE\" \
                      --readFilesCommand zcat \
                      --sjdbOverhang 100 \
-                     --limitBAMsortRAM 45000000000 \
+                     --limitBAMsortRAM $SORT_RAM_BYTES \
                      --outFileNamePrefix \"$OUTPUT_DIR/${BASE_NAME}_\" \
                      --outSAMtype BAM SortedByCoordinate \
                      --outSAMattrRGline ID:$ID LB:$ID SM:$SM PL:$PL PU:$PU \
                      --twopassMode Basic" "$LOG_FILE"
     elif [[ "$MODE" == "te" ]]; then
         # Transposable element optimized parameters
-        log_and_run "STAR --runThreadN 10 \
+        log_and_run "STAR --runThreadN $THREADS \
                     --genomeDir \"$GENOME_DIR\" \
                     --readFilesIn \"$R1_FILE\" \"$R2_FILE\" \
                     --readFilesCommand zcat \
                     --sjdbOverhang 100 \
-                    --limitBAMsortRAM 50000000000 \
+                    --limitBAMsortRAM $SORT_RAM_BYTES \
                     --twopassMode Basic \
                     --outSAMattributes Standard \
                     --outSAMattrRGline ID:$ID LB:$ID SM:$SM PL:$PL PU:$PU \
@@ -183,13 +195,22 @@ process_fastq_pair() {
 
 # Export function and variables for parallel execution
 export -f process_fastq_pair log_and_run
-export GENOME_DIR OUTPUT_DIR LOG_DIR MODE
+export GENOME_DIR OUTPUT_DIR LOG_DIR MODE THREADS
+
+# Convert SORT_RAM to bytes
+if [[ "$SORT_RAM" =~ ^([0-9]+)G$ ]]; then
+    SORT_RAM_BYTES=$((${BASH_REMATCH[1]} * 1000000000))
+else
+    SORT_RAM_BYTES=30000000000  # Default to 30GB if format is incorrect
+fi
 
 # Log script start
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting STAR alignment pipeline (Mode: $MODE)" | tee "$LOG_DIR/pipeline.log"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Working directory: $BATCH_DIR" | tee -a "$LOG_DIR/pipeline.log"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Output directory: $OUTPUT_BASE_DIR" | tee -a "$LOG_DIR/pipeline.log"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Genome directory: $GENOME_DIR" | tee -a "$LOG_DIR/pipeline.log"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Using $THREADS threads per STAR job" | tee -a "$LOG_DIR/pipeline.log"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Using $SORT_RAM for BAM sorting" | tee -a "$LOG_DIR/pipeline.log"
 
 # Create a temporary file to store read pairs
 PAIRS_FILE=$(mktemp)
@@ -238,7 +259,7 @@ while read -r R1_FILE; do
     # Check if R2 file exists
     if [[ -f "$R2_FILE" ]]; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Found pair: $BASE_NAME ($FILENAME - $R2_FILENAME)" | tee -a "$LOG_DIR/pipeline.log" "$PAIRS_LOG"
-        echo "$R1_FILE $R2_FILE $BASE_NAME $DIRNAME $MODE" >> "$PAIRS_FILE"
+        echo "$R1_FILE $R2_FILE $BASE_NAME $DIRNAME $MODE $THREADS $SORT_RAM_BYTES" >> "$PAIRS_FILE"
     else
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Warning: No matching R2 file for: $R1_FILE (expected: $R2_FILE)" | tee -a "$LOG_DIR/pipeline.log"
     fi
@@ -259,7 +280,7 @@ PAIR_COUNT=$(wc -l < "$PAIRS_FILE")
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Found $PAIR_COUNT paired FASTQ files to process" | tee -a "$LOG_DIR/pipeline.log" "$PAIRS_LOG"
 
 # Process all pairs using GNU parallel
-cat "$PAIRS_FILE" | parallel --progress -j "$JOB_NUMBER" --memfree "$GB_FREE" --colsep ' ' process_fastq_pair {1} {2} {3} {4} {5}
+cat "$PAIRS_FILE" | parallel --progress -j "$JOB_NUMBER" --memfree "$GB_FREE" --colsep ' ' process_fastq_pair {1} {2} {3} {4} {5} {6} {7}
 
 # Clean up temporary file
 rm "$PAIRS_FILE"
