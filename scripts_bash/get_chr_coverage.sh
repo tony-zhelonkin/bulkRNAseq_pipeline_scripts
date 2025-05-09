@@ -1,5 +1,7 @@
 #! /bin/bash
 
+# Mouse genome ChrX and ChrY genome coverage
+
 # dir to indexed BAM files (bai files have to be in the same directory)
 BAM_DIR="/data/star_run/sep_run/bam"
 
