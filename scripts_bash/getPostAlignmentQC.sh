@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 #
-#  runPostAlignmentQC.sh  – UNIFIED POST-ALIGNMENT QC PIPELINE
+#  runPostAlignmentQC.sh  – unified post-alignment QC pipeline
 #  -----------------------------------------------------------
-#  Performs (optionally) duplicate removal, a suite of Picard / samtools
-#  metrics, and the full RSeQC battery.
+#  INPUT  : directory of BAMs (read-only OK)
+#  OUTPUT : one MultiQC report + per-tool logs/metrics
 #
 #  WORKFLOW
-#    1. (If needed) coordinate-sort BAMs
-#    2. Picard MarkDuplicates   ── mark or remove dupes
-#    3. Picard CollectRnaSeqMetrics  (strand-aware if requested)
+#    1. Ensure a writable, coordinate-sorted BAM
+#         ─ already sorted?  • default  : use in-place (read-only)
+#                            • --copy-sorted : symlink to $TMPDIR
+#         ─ unsorted?        • samtools sort  → $TMPDIR
+#    2. Picard MarkDuplicates   (mark OR remove dupes)
+#    3. Picard CollectRnaSeqMetrics   (strand-aware)
 #    4. samtools flagstat
 #    5. RSeQC modules
 #         • infer_experiment.py
@@ -18,57 +21,31 @@
 #         • inner_distance.py
 #         • junction_annotation.py
 #         • junction_saturation.py
-#    6. Aggregate everything (plus any *_STARpass1 folders) with MultiQC
+#    6. Aggregate everything (and *_STARpass1) with MultiQC
 #
-#  REQUIRED ARGUMENTS
-#    -i  DIR   directory containing BAM files
-#    -o  DIR   output base directory for all QC results
-#    -r  FILE  reference genome FASTA
-#    -e  FILE  ribosomal.intervals file for Picard
-#    -f  FILE  refFlat annotation for Picard
-#    -b  FILE  BED gene model for all RSeQC tools
+#  REQUIRED
+#    -i DIR   BAM directory
+#    -o DIR   output directory
+#    -r FILE  genome.fa
+#    -e FILE  ribosomal.interval_list      (Picard)
+#    -f FILE  refFlat.txt                  (Picard)
+#    -b FILE  genes.bed (BED12)            (RSeQC)
 #
-#  KEY OPTIONS
-#       --remove-duplicates          physically drop duplicates (default: mark only)
-#       --strand STRAND              NONE | FIRST_READ_TRANSCRIPTION_STRAND | SECOND_READ_TRANSCRIPTION_STRAND
-#    -j  INT   parallel samples to process      [4]
-#    -t  INT   threads per tool invocation      [8]
-#    -T  DIR   temporary directory (default: /tmp or \$TMPDIR)
+#  COMMON OPTIONS
+#       --remove-duplicates   drop duplicates (default: mark only)
+#       --strand STRAND       NONE | FIRST_READ_TRANSCRIPTION_STRAND | SECOND_READ_TRANSCRIPTION_STRAND
+#       --copy-sorted         copy / symlink pre-sorted BAMs to $TMPDIR instead of using in place
+#    -j INT  parallel samples      [4]
+#    -t INT  threads per tool      [8]
+#    -T DIR  temp dir (default: /tmp or $TMPDIR)
 #
-#  EXAMPLES
+#  EXAMPLE (duplicates kept, strand NONE, copy sorted BAMs)
+#    runPostAlignmentQC.sh \
+#         -i /in -o /out \
+#         -r genome.fa -e rRNA.interval_list -f refFlat.txt -b genes.bed \
+#         -j 4 -t 8 --strand NONE --copy-sorted
 #
-#  1) **Default** – mark duplicates, strand NONE
-#     ./runPostAlignmentQC.sh \\
-#          -i ./bam \\
-#          -o ./QC \\
-#          -r genome.fa \\
-#          -e rRNA.interval_list \\
-#          -f refFlat.txt \\
-#          -b genes.bed
-#
-#  2) **Remove duplicates** and use first-strand library setting
-#     ./runPostAlignmentQC.sh \\
-#          -i ./bam -o ./QC -r genome.fa -e rRNA.interval_list -f refFlat.txt -b genes.bed \\
-#          --remove-duplicates \\
-#          --strand FIRST_READ_TRANSCRIPTION_STRAND
-#
-#  3) **Docker** with explicit TMPDIR (duplicates kept, strand NONE)
-#     docker run --rm -it \\
-#       -v \$PWD/bam:/in:ro \\
-#       -v \$PWD/QC:/out \\
-#       -v \$PWD/QC/tmp:/out/tmp -e TMPDIR=/out/tmp \\
-#       -v \$PWD/ref:/genome:ro \\
-#       myimage:latest \\
-#       bash -c '/pipeline/runPostAlignmentQC.sh \\
-#                   -i /in -o /out \\
-#                   -r /genome/genome.fa \\
-#                   -e /genome/rRNA.interval_list \\
-#                   -f /genome/refFlat.txt \\
-#                   -b /genome/genes.bed \\
-#                   -j 4 -t 8 --strand NONE'
-#
-#  Author: Anton Zhelonkin
-#  Last update: 2025-05-09
+#  Author : Anton Zhelonkin · 2025-05-09
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -82,12 +59,13 @@ JOBS=4
 THREADS=8
 REMOVE_DUPES="false"
 STRAND="NONE"
+COPY_SORTED="false"
 # ---------------------------------------------------------------------------
 
 usage() { grep '^#' "$0" | cut -c4-; exit 1; }
 
 SHORT="i:o:r:e:f:b:j:t:T:h"
-LONG="remove-duplicates,strand:,ribosomal-intervals:,ref-flat:,bed-annot:,help"
+LONG="remove-duplicates,strand:,copy-sorted,ribosomal-intervals:,ref-flat:,bed-annot:,help"
 PARSED=$(getopt -o "$SHORT" --long "$LONG" -n "$0" -- "$@") || usage
 eval set -- "$PARSED"
 
@@ -104,6 +82,7 @@ while true; do
     -T) TMPDIR=$2; shift 2 ;;
     --remove-duplicates) REMOVE_DUPES="true"; shift ;;
     --strand) STRAND=$2; shift 2 ;;
+    --copy-sorted) COPY_SORTED="true"; shift ;;
     -h|--help) usage ;;
     --) shift; break ;;
     *) usage ;;
@@ -137,14 +116,20 @@ process_bam() {
 
   echo -e "\n===== ${base} =====" >> "$wlog"
 
-  # 1) coordinate-sorted BAM
-  local sorted="${bam%.bam}.sorted.bam"
-  if samtools view -H "$bam" | grep -q "@HD.*SO:coordinate"; then
-      cp "$bam" "$sorted"
-  else
+  # 1) obtain writable, coordinate-sorted BAM
+  local sorted
+  if samtools view -H "$bam" | grep -q "@HD.*SO:coordinate"; then         # already sorted
+      if [[ "$COPY_SORTED" == "true" ]]; then
+          sorted="${TMPDIR}/${base}.sorted.bam"
+          ln -s "$bam" "$sorted"                # lightweight copy
+      else
+          sorted="$bam"                         # use in place (read-only OK)
+      fi
+  else                                                                    # need sorting
+      sorted="${TMPDIR}/${base}.sorted.bam"
       run_cmd "samtools sort -@ ${THREADS} -o ${sorted} ${bam}" "$wlog"
+      run_cmd "samtools index ${sorted}" "$wlog"
   fi
-  run_cmd "samtools index ${sorted}" "$wlog"
 
   # 2) Picard MarkDuplicates
   local mkd="${PICARD_DIR}/${base}_marked.bam"
@@ -162,7 +147,7 @@ process_bam() {
   # 4) samtools flagstat
   run_cmd "samtools flagstat ${qc_bam} > ${SAMTOOLS_DIR}/${base}_flagstat.txt" "$wlog"
 
-  # 5) RSeQC
+  # 5) RSeQC suite
   run_cmd "infer_experiment.py   -i ${qc_bam} -r ${BED_ANNOT} \
            > ${RSEQ_DIR}/${base}_infer_experiment.txt" "$wlog"
   run_cmd "read_duplication.py   -i ${qc_bam} -o ${RSEQ_DIR}/${base}_dup" "$wlog"
@@ -181,7 +166,7 @@ process_bam() {
 }
 export -f process_bam run_cmd
 export PICARD_DIR RSEQ_DIR SAMTOOLS_DIR LOG_DIR REF_GENOME REF_FLAT \
-       RIBO_INTERVALS BED_ANNOT TMPDIR THREADS REMOVE_DUPES STRAND
+       RIBO_INTERVALS BED_ANNOT TMPDIR THREADS REMOVE_DUPES STRAND COPY_SORTED
 
 # --------------------------- run in parallel --------------------------------
 find "$INPUT_DIR" -maxdepth 1 -type f -name "*.bam" | \
