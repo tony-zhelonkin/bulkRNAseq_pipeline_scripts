@@ -34,7 +34,7 @@
 #   ./runFeatureCounts.sh -i ./aligned_bams -o ./counts -a /path/to/annotation.gtf -s 2
 #
 # Author: Anton Zhelonkin
-# Date: 2023
+# Date: 2025
 
 # Default parameters
 INPUT_DIR="."
