@@ -8,6 +8,17 @@
 
 This script performs pre-alignment quality control (QC) on raw sequencing data using **FastQC** and **MultiQC**. It processes `.fq.gz`, `.fastq.gz`, and `.fasta` files in parallel, generating individual FastQC reports for each file and a consolidated MultiQC report.
 
+### Problems 
+
+`getPostAlignment.QC`
+- bam index must be built before the ReSEQc scripts run 
+- the bed12 annotation I created might be bed, need a 12-column check and check against pre-built annotation
+- my ribosomal intervals file may be smaller than the pre-built one, inspect differences 
+- Picard doesn\`t build ribosomal intervals plot
+- old Picard synthax
+- R RSEQc scripts do not initialize properly
+- Need to think of some additional tools
+
 ### Usage
 
 ```bash
