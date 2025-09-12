@@ -615,3 +615,155 @@ This script performs RNA-seq read quantification using **featureCounts** and pro
 - A raw featureCounts output file in `RAW_OUTPUT_DIR`.
 - A sorted count matrix file in `MATRIX_OUTPUT_DIR`, with simplified column headers and lexicographically ordered sample columns.
 - Log files in `LOG_DIR`, including featureCounts execution logs and script completion status.
+
+---
+
+## TE + Genes FeatureCounts (`scripts_bash/runFeatureCounts_TE_and_genes.sh`)
+This driver wraps two counting passes and keeps outputs aligned by sample order:
+
+- Purpose: generate TE counts from a RepeatMasker-derived SAF and gene counts from a GTF, then optionally output a combined matrix.
+- Interop: runs TE counting internally with `featureCounts` on a SAF file, then calls `scripts_bash/runFeatureCounts.sh` for gene counting using the same sorted BAM list and your chosen strandedness.
+- TE defaults: uses `-M --fraction -p -B -C` with unstranded counting to avoid halving bidirectional TE signal. Optionally emits sense/antisense matrices if the library is stranded.
+
+### CLI
+- `-i`: BAM directory (non‑recursive)
+- `-o`: Output base directory (script creates subfolders)
+- `-g`: Gene GTF (e.g., `gencode.vM37.primary_assembly.annotation.filtered.gtf`)
+- `-e`: TE SAF (grouped TE SAF; see preprocessing below)
+- `-S`: Gene strandedness for `featureCounts` (`0|1|2`)
+- `-t`: Threads (default `12`)
+- `--te-strand`: `unstranded|sense_antisense` (default `unstranded`)
+
+### Outputs
+- TE: `out/featurecounts_TE/te_counts_matrix.txt` (+ raw and optional sense/antisense matrices)
+- Genes: `out/fc_genes/count_matrices_fc/sorted_counts_matrix.txt`
+- Combined: `out/combined_gene_TE_counts.tsv` (row‑bind of gene + TE matrices with identical header/sample order)
+
+### Example (Docker)
+```bash
+IN=/data1/users/antonz/data/DM_summer_2025/13444-DM/results_mm39_TE/star_salmon/bam_fin
+OUT=/data1/users/antonz/data/DM_summer_2025/13444-DM/results_mm39_TE/star_salmon/featurecounts_results
+GENE_GTF=/data1/users/antonz/data/DM_summer_2025/13444-DM/results_mm39_TE/genome/gencode.vM37.primary_assembly.annotation.filtered.gtf
+TE_SAF=/data1/shared/ref/mouse/Ensembl/mm39/GRCm39_rmsk_TE_GROUPED_all_noExon1.saf  # reuse same SAF
+
+docker run --rm -u $(id -u):$(id -g) \
+  -v "$IN":/in:ro -v "$OUT":/out \
+  -v "$(dirname "$GENE_GTF")":/genome:ro \
+  -v "$(dirname "$TE_SAF")":/te:ro \
+  -v "/data1/users/antonz/pipeline/bulkRNAseq_pipeline_scripts/scripts_bash":/scripts:ro \
+  scdock-r-dev:v0.2 \
+  bash -lc "/scripts/runFeatureCounts_TE_and_genes.sh \
+    -i /in -o /out \
+    -g /genome/$(basename "$GENE_GTF") \
+    -e /te/$(basename "$TE_SAF") \
+    -S 0 \
+    -t 12 \
+    --te-strand unstranded"
+```
+
+### Interop with `runFeatureCounts.sh`
+- TE pass: `runFeatureCounts_TE_and_genes.sh` runs `featureCounts` directly with `-F SAF -a <TE_SAF> -M --fraction -p --countReadPairs -B -C`. Default `-s 0` (unstranded).
+- Gene pass: the script then invokes `scripts_bash/runFeatureCounts.sh` with your `-g gene_id -f exon -s <S>` and the same BAM list to produce `sorted_counts_matrix.txt`.
+- Combined: if both matrices exist, it row‑binds them into `combined_gene_TE_counts.tsv`.
+
+### Why TE unstranded by default?
+TE transcription is often bidirectional relative to the RepeatMasker strand; unstranded avoids halving biologically real signal. If you need sense/antisense splits for a stranded library, run with `--te-strand sense_antisense`. For reverse‑stranded libs, sense=`-s 2`, antisense=`-s 1` (the script handles this automatically).
+
+### TE GTF preprocessing (build a grouped TE SAF)
+You need a "grouped" TE SAF that uses TEtranscripts‑like labels so featureCounts can sum loci of the same group into one meta‑feature.
+
+1) Build grouped SAF (one row per locus; `GeneID` is the group label)
+```bash
+TE_GTF=/data1/shared/ref/mouse/Ensembl/mm39/GRCm39_Ensembl_rmsk_TE.gtf.gz
+SAF_ALL=/data1/shared/ref/mouse/Ensembl/mm39/GRCm39_rmsk_TE_GROUPED_all1.saf
+
+zcat "$TE_GTF" |
+awk 'BEGIN{OFS="\t"; print "GeneID\tChr\tStart\tEnd\tStrand"}
+     $0 !~ /^#/ {
+       match($0,/gene_id "([^"]+)"/,g);      # subfamily / repName
+       match($0,/family_id "([^"]+)"/,f);    # family
+       match($0,/class_id "([^"]+)"/,c);     # class (LINE/LTR/SINE/DNA/RC/...)
+       gid = g[1] ":" f[1] ":" c[1];         # TEtranscripts-like label
+       print gid, $1, $4, $5, $7
+     }' > "$SAF_ALL"
+
+# Checks
+head -3 "$SAF_ALL"
+wc -l "$SAF_ALL"
+cut -f1 "$SAF_ALL" | tail -n +2 | sort -u | wc -l
+```
+
+1B) (Recommended) Keep retrotransposons only (drop Simple_repeat, etc.)
+```bash
+SAF_RETRO=/data1/shared/ref/mouse/Ensembl/mm39/GRCm39_rmsk_TE_GROUPED_retro.saf
+
+zcat "$TE_GTF" |
+awk 'BEGIN{OFS="\t"; print "GeneID\tChr\tStart\tEnd\tStrand"}
+     $0 !~ /^#/ {
+       match($0,/class_id "([^"]+)"/,cl); cls = cl[1]
+       if (cls=="LINE" || cls=="SINE" || cls=="LTR" || cls=="RC") {
+         match($0,/gene_id "([^"]+)"/,g);
+         match($0,/family_id "([^"]+)"/,f);
+         gid = g[1] ":" f[1] ":" cls;
+         print gid, $1, $4, $5, $7
+       }
+     }' > "$SAF_RETRO"
+```
+
+1C) (Optional) Remove TE loci overlapping gene exons (conservative cleanup)
+```bash
+GENE_GTF=/data1/users/antonz/data/DM_summer_2025/13441-DM/results_mm39_TE/genome/gencode.vM37.primary_assembly.annotation.filtered.gtf
+awk 'BEGIN{OFS="\t"} $3=="exon"{print $1,$4-1,$5,".",".",$7}' "$GENE_GTF" > exons.bed
+
+# Make TE BED from SAF (0-based)
+IN_SAF="$SAF_ALL"  # or $SAF_RETRO
+awk 'BEGIN{OFS="\t"} NR>1{print $2,$3-1,$4,$1,".",$5}' "$IN_SAF" > te_grouped.bed
+
+# Normalize contig names if needed (either both with 'chr' or both without)
+grep -m1 '^chr' exons.bed      || echo "exons: no chr prefix"
+grep -m1 '^chr' te_grouped.bed || echo "te:    no chr prefix"
+# Example: strip 'chr' from exons to match TE
+sed -E 's/^chr//' exons.bed > exons.tmp && mv exons.tmp exons.bed
+
+# Sort for bedtools
+LC_ALL=C sort -k1,1 -k2,2n exons.bed       -o exons.bed
+LC_ALL=C sort -k1,1 -k2,2n te_grouped.bed  -o te_grouped.bed
+
+# Subtract exons from TE loci
+bedtools intersect -a te_grouped.bed -b exons.bed -u | wc -l
+bedtools subtract  -a te_grouped.bed -b exons.bed > te_grouped_noExon.bed
+bedtools intersect -a te_grouped_noExon.bed -b exons.bed -u | wc -l   # should be 0
+
+# Rebuild SAF
+SAF_NOEXON=/data1/shared/ref/mouse/Ensembl/mm39/GRCm39_rmsk_TE_GROUPED_all_noExon1.saf
+awk 'BEGIN{OFS="\t"; print "GeneID\tChr\tStart\tEnd\tStrand"}
+     {print $4,$1,$2+1,$3,$6}' te_grouped_noExon.bed > "$SAF_NOEXON"
+```
+
+#### Inspect and control class filtering
+```bash
+# Unique classes in TE GTF
+TE_GTF=/data1/shared/ref/mouse/Ensembl/mm39/GRCm39_Ensembl_rmsk_TE.gtf.gz
+zcat "$TE_GTF" |
+awk '$0!~/^#/{ if (match($0,/class_id "([^"]+)"/,m)) print m[1]; else print "NA" }' |
+sort | uniq -c | sort -nr
+
+# Build whitelist via regex
+KEEP_CLASSES='^(LINE|SINE|LTR|RC)$'
+SAF_RETRO=/data1/shared/ref/mouse/Ensembl/mm39/GRCm39_rmsk_TE_GROUPED_retro.saf
+zcat "$TE_GTF" |
+awk -v pat="$KEEP_CLASSES" 'BEGIN{OFS="\t"; print "GeneID\tChr\tStart\tEnd\tStrand"}
+     $0!~/^#/{
+       match($0,/class_id "([^"]+)"/,cl); cls=cl[1];
+       if (cls ~ pat){
+         match($0,/gene_id "([^"]+)"/,g);
+         match($0,/family_id "([^"]+)"/,f);
+         print g[1] ":" f[1] ":" cls, $1, $4, $5, $7
+       }
+     }' > "$SAF_RETRO"
+
+# Sanity‑check classes in the SAF
+cut -f1 "$SAF_RETRO" | tail -n +2 | awk -F: '{print $3}' | sort -u
+```
+
+With this preprocessing, use the final SAF (e.g., `GRCm39_rmsk_TE_GROUPED_all_noExon1.saf`) as `-e` for the TE pass.
