@@ -1,4 +1,12 @@
-# bulkRNAseq_pipeline_scripts
+# Bulk RNA-seq Pipeline Scripts
+
+## Pipeline Logic
+
+Below is the general logic of the pipeline:
+
+![Pipeline Diagram](https://raw.githubusercontent.com/tony-zhelonkin/RNAseq_pipelineDock/master/RnaSeqDock_pipeline.png)
+
+**Note!** The pipeline is just a set of separate scripts currently. You need to tailor the scripts and paths to your use case. It's not a press-one-button story for the moment.
 
 # SCRIPTS DESCRIPTION
 
