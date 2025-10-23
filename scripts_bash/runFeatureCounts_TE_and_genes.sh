@@ -103,7 +103,7 @@ TE_RAW="${TE_DIR}/te_counts_raw.txt"
 TE_MAT="${TE_DIR}/te_counts_matrix.txt"
 
 featureCounts \
-  -M --fraction \
+  -M \
   -F SAF -a "$TE_SAF" \
   -o "$TE_RAW" \
   -s 0 \
