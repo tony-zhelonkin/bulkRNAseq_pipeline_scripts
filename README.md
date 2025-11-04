@@ -2,7 +2,7 @@
 
 # THIS REPOSITORY IS DEPRECATED AND NO LONGER MAINTAINED. 
 
-I have moved to publicly developed pipelines, such as [nf-core rnaseq](https://github.com/nf-core/rnaseq), but I will continue to use and develop some of the tools I that have evolved out of this repository, see [TE-RNAseq-toolkit]()
+I have moved to publicly developed pipelines, such as [nf-core rnaseq](https://github.com/nf-core/rnaseq), but I will continue to use and develop some of the tools I that have evolved out of this repository, see [TE-RNAseq-toolkit](https://github.com/tony-zhelonkin/TE-RNAseq-toolkit)
 
 ## Pipeline Logic
 
